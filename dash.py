@@ -1,9 +1,37 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import json
 
 # Carregar o CSV
-df = pd.read_csv("estoque_cnae_municipios.csv")
+df = pd.read_csv("estoque_sem_negativos.csv")
+
+# Carregar GeoJSON para o mapa
+@st.cache_data
+def carregar_geojson():
+    with open('geojs-43-mun.json', 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+geojson_rs = carregar_geojson()
+
+# Função para corrigir nomes de municípios para o mapa
+def corrigir_nomes_municipios(df):
+    """Corrige nomes de municípios para bater com o GeoJSON"""
+    df_corrigido = df.copy()
+    
+    # Mapeamento de correções
+    correcoes = {
+        'Restinga Sêca': 'Restinga Seca',
+        'Westfália': 'Westfalia', 
+        "Sant'Ana do Livramento": "Sant' Ana do Livramento",
+        'Vespasiano Corrêa': 'Vespasiano Correa'
+    }
+    
+    # Aplicar correções
+    for nome_original, nome_corrigido in correcoes.items():
+        df_corrigido.loc[df_corrigido['municipio'] == nome_original, 'municipio'] = nome_corrigido
+    
+    return df_corrigido
 
 # Função para classificar CNAE em seção
 def classificar_secao_cnae(cnae):
@@ -47,7 +75,7 @@ def classificar_secao_cnae(cnae):
         return "Outras Atividades de Serviços"
     elif 97000 <= cnae <= 97999:
         return "Serviços Domésticos"
-    elif 99000 <= cnae <= 99999:  # CORRIGIDO: era 9999, agora é 99999
+    elif 99000 <= cnae <= 99999:
         return "Organismos Internacionais e Outras Instituições Extraterritoriais"
     else:
         return "Não classificado"
@@ -65,13 +93,13 @@ municipios_selecionados = st.sidebar.multiselect(
     "Selecione o(s) município(s):", municipios, default=municipios[:1]
 )
 secoes_selecionadas = st.sidebar.multiselect(
-    "Selecione a(s) seção(ões) CNAE:", secoes, default=secoes[:1]  # CORRIGIDO: default apenas 1 seção
+    "Selecione a(s) seção(ões) CNAE:", secoes, default=secoes[:1]
 )
 
 # Navegação na sidebar
 pagina = st.sidebar.radio(
     "Navegação",
-    ("Gráfico Barras CNAE", "Gráfico Linha Temporal", "CNAEs da Seção")
+    ("Gráfico Barras CNAE", "Gráfico Linha Temporal", "CNAEs da Seção", "Mapa do RS")
 )
 
 # Função para gráfico de barras agrupadas
@@ -110,7 +138,6 @@ def grafico_linha():
         (df["Seção CNAE"].isin(secoes_selecionadas))
     ].copy()
 
-    # CORRIGIDO: Ordem correta dos meses
     meses = [
         "estoque_jan", "estoque_fev", "estoque_mar", "estoque_abr",
         "estoque_mai", "estoque_jun", "estoque_jul", "estoque_ago", 
@@ -120,7 +147,6 @@ def grafico_linha():
         "Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"
     ]
 
-    # Montar DataFrame para gráfico de linha
     dados = []
     for _, row in df_filtrado.iterrows():
         for i, mes in enumerate(meses):
@@ -132,11 +158,8 @@ def grafico_linha():
             })
 
     df_linha = pd.DataFrame(dados)
-
-    # CORRIGIDO: Definir ordem correta dos meses no gráfico
     df_linha["Mês"] = pd.Categorical(df_linha["Mês"], categories=meses_legenda, ordered=True)
 
-    # Agregar por município, seção e mês
     df_linha_agg = (
         df_linha.groupby(["Município", "Seção CNAE", "Mês"])["Empregados"]
         .sum()
@@ -160,12 +183,10 @@ def grafico_linha():
 def grafico_cnaes_secao():
     st.title("CNAEs de 5 Dígitos por Seção e Município")
 
-    # CORRIGIDO: Verificar se há seções selecionadas
     if not secoes_selecionadas:
         st.warning("Selecione pelo menos uma seção CNAE nos filtros.")
         return
 
-    # CORRIGIDO: Usar .isin() para múltiplas seções
     df_filtrado = df[
         (df["municipio"].isin(municipios_selecionados)) &
         (df["Seção CNAE"].isin(secoes_selecionadas))
@@ -184,14 +205,12 @@ def grafico_cnaes_secao():
         .reset_index()
     )
 
-    # Filtrar apenas CNAEs com empregados > 0
     df_agg = df_agg[df_agg["total_empregados"] > 0]
 
     if df_agg.empty:
         st.warning("Nenhum CNAE com empregados encontrado para os filtros selecionados.")
         return
 
-    # CORRIGIDO: Título dinâmico baseado nas seções selecionadas
     secoes_titulo = ", ".join(secoes_selecionadas) if len(secoes_selecionadas) <= 3 else f"{len(secoes_selecionadas)} seções selecionadas"
 
     fig = px.bar(
@@ -202,17 +221,106 @@ def grafico_cnaes_secao():
         barmode="group",
         labels={"total_empregados": "Total de Empregados", "CNAE": "CNAE (5 dígitos)"},
         title=f"Total de Empregados por CNAE (5 dígitos) - {secoes_titulo}",
-        hover_data=["Seção CNAE"]  # Adicionar seção no hover
+        hover_data=["Seção CNAE"]
     )
 
-    # Rotacionar labels do eixo X se houver muitos CNAEs
     if len(df_agg["CNAE"].unique()) > 10:
         fig.update_layout(xaxis_tickangle=-45)
 
     st.plotly_chart(fig, use_container_width=True)
 
-# CORRIGIDO: Verificar se há municípios selecionados antes de executar
-if not municipios_selecionados:
+# Nova função para o mapa do RS
+def mapa_rs():
+    st.title("Mapa de Estoque por Município - Rio Grande do Sul")
+    
+    # Aplicar filtros se selecionados
+    if municipios_selecionados or secoes_selecionadas:
+        df_filtrado = df.copy()
+        
+        if municipios_selecionados:
+            df_filtrado = df_filtrado[df_filtrado["municipio"].isin(municipios_selecionados)]
+        
+        if secoes_selecionadas:
+            df_filtrado = df_filtrado[df_filtrado["Seção CNAE"].isin(secoes_selecionadas)]
+        
+        # Mostrar informações dos filtros aplicados
+        col1, col2 = st.columns(2)
+        with col1:
+            if municipios_selecionados:
+                st.info(f"🏙️ Municípios: {len(municipios_selecionados)} selecionados")
+        with col2:
+            if secoes_selecionadas:
+                st.info(f"🏭 Seções CNAE: {len(secoes_selecionadas)} selecionadas")
+    else:
+        df_filtrado = df.copy()
+        st.info("📍 Mostrando todos os municípios e seções CNAE")
+    
+    # Agrupar por município
+    estoque_por_municipio = df_filtrado.groupby('municipio')['estoque_2023'].sum().reset_index()
+    
+    if estoque_por_municipio.empty:
+        st.warning("Nenhum dado encontrado para os filtros selecionados.")
+        return
+    
+    # Corrigir nomes para corresponder ao GeoJSON
+    estoque_corrigido = corrigir_nomes_municipios(estoque_por_municipio)
+    
+    # Preparar dados para o mapa
+    resultado = estoque_corrigido.copy()
+    resultado = resultado.rename(columns={'municipio': 'name', 'estoque_2023': 'estoque'})
+    
+    # Criar o mapa
+    fig = px.choropleth(
+        resultado,
+        geojson=geojson_rs,
+        featureidkey="properties.name",
+        locations="name",
+        color="estoque",
+        color_continuous_scale="YlOrRd",
+        range_color=[resultado['estoque'].min(), resultado['estoque'].max()],
+        labels={'estoque': 'Estoque 2023'},
+        title='Estoque Total por Município - Rio Grande do Sul (2023)',
+        hover_name="name",
+        hover_data={'estoque': ':,'}
+    )
+    
+    # Configurações do mapa
+    fig.update_geos(
+        fitbounds="locations",
+        visible=False
+    )
+    
+    # Layout
+    fig.update_layout(
+        margin={"r":0,"t":60,"l":0,"b":0},
+        width=1000,
+        height=700,
+        title_x=0.5,
+        font=dict(size=12)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Estatísticas resumidas
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Municípios Mapeados", len(resultado))
+    with col2:
+        st.metric("Estoque Total", f"{resultado['estoque'].sum():,}")
+    with col3:
+        maior_estoque = resultado.loc[resultado['estoque'].idxmax()]
+        st.metric("Maior Estoque", f"{maior_estoque['name']}", f"{maior_estoque['estoque']:,}")
+    
+    # Top 10 municípios
+    if len(resultado) > 10:
+        st.subheader("🏆 Top 10 Municípios por Estoque")
+        top_10 = resultado.nlargest(10, 'estoque')[['name', 'estoque']]
+        top_10.columns = ['Município', 'Estoque 2023']
+        top_10['Estoque 2023'] = top_10['Estoque 2023'].apply(lambda x: f"{x:,}")
+        st.dataframe(top_10, use_container_width=True, hide_index=True)
+
+# Verificar se há municípios selecionados antes de executar
+if not municipios_selecionados and pagina != "Mapa do RS":
     st.warning("Selecione pelo menos um município nos filtros da barra lateral.")
 elif pagina == "Gráfico Barras CNAE":
     grafico_barras()
@@ -220,3 +328,5 @@ elif pagina == "Gráfico Linha Temporal":
     grafico_linha()
 elif pagina == "CNAEs da Seção":
     grafico_cnaes_secao()
+elif pagina == "Mapa do RS":
+    mapa_rs()
